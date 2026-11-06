@@ -54,33 +54,47 @@ def snow_utc(ts):
                                           datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 def parse(html):
+    """正文按 timeline-item 抽取；配图按 pbs 链接在全文中的位置，
+    归属到其前方最近的 /<账号>/status/<id>（Hoyooyoo 之外的账号视为边界，
+    避免把引用推文的图错算到本人推文上）。"""
+    # ---- 正文 ----
     out = {}
     for b in re.split(r'<div class="timeline-item', html):
-        m = re.search(r'/Hoyooyoo/status/(\d+)', b)
-        if not m: continue
-        tid = m.group(1)
-        if tid in out: continue
         tm = re.search(r'title="([^"]+ UTC)"', b)
-        txt = ""
-        cm = re.search(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>\s*<button class="translate-btn"', b, re.S)
-        if cm: txt = clean(cm.group(1))
-        imgs = sorted(set(re.findall(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', b)))
-        # 只保留本条推文自身的图（取到本条 status 链接之后的部分）
-        idx = b.find(m.group(0))
-        tail = b[idx:]
-        imgs = sorted(set(re.findall(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', tail)))
-        # 去掉正文之后可能串到的下一条：按 tweet-content 出现顺序取第一段 media
         mm = re.search(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', b, re.S)
-        if mm:
-            seg = mm.group(1)
-            imgs = sorted(set(re.findall(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', b[:b.find(seg)+len(seg)])))
+        if not mm:
+            continue
+        txt = clean(mm.group(1))
+        ids = re.findall(r'/Hoyooyoo/status/(\d+)', b)
+        if not ids:
+            continue
+        tid = ids[0]
         raw_dt = tm.group(1) if tm else ""
         try:
             dt = datetime.datetime.strptime(raw_dt, "%b %d, %Y · %I:%M %p UTC").strftime("%Y-%m-%d %H:%M")
         except Exception:
             dt = snow_utc(int(tid))
-        out[tid] = {"id": tid, "date_utc": dt, "text": txt, "images": imgs,
+        if tid in out and out[tid]["text"]:
+            continue
+        out[tid] = {"id": tid, "date_utc": dt, "text": txt, "images": [],
                     "url": "https://x.com/Hoyooyoo/status/" + tid}
+    # ---- 配图归属 ----
+    marks = []
+    for m in re.finditer(r'href="/([A-Za-z0-9_]+)/status/(\d+)', html):
+        marks.append((m.start(), "S", m.group(1), m.group(2)))
+    for m in re.finditer(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', html):
+        marks.append((m.start(), "M", None, m.group(1)))
+    marks.sort()
+    cur = None
+    for pos, kind, acct, val in marks:
+        if kind == "S":
+            cur = val if acct == "Hoyooyoo" else None
+        else:
+            if cur and val not in out.get(cur, {}).get("images", []):
+                out.setdefault(cur, {"id": cur, "date_utc": snow_utc(int(cur)),
+                                     "text": "", "images": [],
+                                     "url": "https://x.com/Hoyooyoo/status/" + cur})
+                out[cur]["images"].append(val)
     return out
 
 def main():
