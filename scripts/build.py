@@ -13,9 +13,30 @@
 3) 静态文字里的计数（条点位 / 条推文原文 / 张原图 / 共 N 张）全部由数据实时回写，
    不再留下与实际不符的旧数字。
 """
-import os, re, json, csv, base64, shutil, urllib.request, urllib.error, urllib.parse, sys, subprocess, tempfile, time
+import os, re, json, csv, base64, shutil, datetime, urllib.request, urllib.error, urllib.parse, sys, subprocess, tempfile, time
 
 DECL_ORDER = ("DATA", "T2", "T3", "T2I")
+
+# ---- 时区口径：全表推文日期统一按北京时间(UTC+8) ----
+BJ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def snow_bj(ts):
+    """由推文 snowflake ID 推出北京时间字符串"""
+    return datetime.datetime.fromtimestamp(((int(ts) >> 22) + 1288834974657) / 1000,
+                                           BJ).strftime("%Y-%m-%d %H:%M")
+
+
+def norm_date(link, cur):
+    """按推文链接里的 snowflake ID 重算北京时间；无链接则保留原值"""
+    m = re.search(r'/status/(\d+)', str(link))
+    if not m:
+        return cur
+    try:
+        return snow_bj(m.group(1))
+    except Exception:
+        return cur
+
 
 
 def slice_json(text, start):
@@ -257,6 +278,17 @@ def main():
         print("[ABORT] 无法解析基线数据块: %s: %s" % (type(e).__name__, e))
         sys.exit(2)
     DATA, T2, T3, T2I = vals["DATA"], vals["T2"], vals["T3"], vals["T2I"]
+    # ---- 时区统一：基线里所有推文日期按北京时间(UTC+8)重算 ----
+    _tz = 0
+    for _r in DATA:
+        if len(_r) > 7:
+            _nd = norm_date(_r[7], _r[6])
+            if _nd != _r[6]: _r[6] = _nd; _tz += 1
+    for _r in T2:
+        if len(_r) > 3:
+            _nd = norm_date(_r[3], _r[2])
+            if _nd != _r[2]: _r[2] = _nd; _tz += 1
+    print("[tz] 基线日期按北京时间(UTC+8)重算，修正 %d 处" % _tz)
     # rows 按推文链接去重，避免同一推文被重复收录
     # 去重键必须是 (链接,品种,点位) 三元组：同一条推文常给出多个点位
     # （例：比特币那条同时给 79000/81000/80000），只用链接会把后续点位全部挤掉。
@@ -271,6 +303,8 @@ def main():
         key = (link, str(row[0]), str(row[1]))
         if link and key in seen_keys:
             print("[skip] 该点位已收录，跳过: %s %s %s" % (link, row[0], row[1])); continue
+        if len(row) > 6:
+            row[5] = norm_date(row[6], row[5] if len(row) > 5 else "")
         DATA.append([str(len(DATA) + 1)] + list(row))
         seen_keys.add(key); n_new += 1
     print("[rows] 新增 %d 行点位 -> DATA=%d" % (n_new, len(DATA)))
@@ -286,6 +320,7 @@ def main():
         for e in nl["t2"]:
             if len(e) < 4: continue
             tid = str(e[0]); date = e[1]; link = e[2]; text = e[3]
+            date = norm_date(link, date)
             if tid in have: continue
             T2.append([str(len(T2) + 1), tid, date, link, text, T2I.get(tid, "")])
             have.add(tid); added += 1
