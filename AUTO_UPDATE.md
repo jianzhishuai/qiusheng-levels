@@ -27,7 +27,7 @@
 - build.py 会把 new_levels.json 的 rows **追加**到 DATA 尾部；new_levels.json 必须在构建成功后清空为 {"rows":[],"images":[]}，否则重复行
 - source_index.html 是唯一基线，每轮成功后用 index.html 覆盖
 - 绝不把 token 写入任何上传文件
-- 已知推文 id（40 个）见 known_ids.txt
+- 已知推文 id 见 known_ids.txt（由 state.py 自动维护，勿手改）
 
 
 ## 2026-11-06 更新（重要）
@@ -38,3 +38,20 @@
   不要再从上一轮临时目录恢复脚本（脚本已入库 `scripts/`）。
 - 跑完 build.py 后必须确认 `source_index.html` 与 `index.html` 一致（cp 覆盖），
   防止下一轮拿旧基线重放已修内容。
+
+## 2026-11-07 更新
+
+- **翻页终止条件修正**：`fetch.py` 原以「本页新增=0」作为翻页终止条件，
+  但 nitter 各页存在重复推文（单页重复 1~3 条），导致计数虚低而**提前停止翻页**，
+  漏抓更早的推文。现改为：本页无新推文**且**至少已翻 2 页才停止。
+- **跨页补图**：推文正文可能出现在第 1 页、配图出现在后续页；
+  `parse()` 现会把后页图片回填到已收录推文（`ALLT` 全局引用）。
+- **`parse()` 返回值改为 `(dict, fresh_ids)`**：`fresh_ids` 为本页相对已收录集合的新增推文 id。
+- **回复流必须抓取**：旧版 `get_any()` 只返回首个成功源，
+  `/with_replies` 回复流从未被请求过 —— 这是「表格停在 11-06」的根因。
+  现为 `get_all()`，抓取组内全部源并合并。
+- **推送必须单次提交**：逐文件 PUT 会触发多次 Pages 构建并互相打断
+  （历史 run 连续 cancelled/errored）。现用 Git Data API：
+  blob → tree → commit → ref，**一次提交 = 一次构建**。
+- **时间口径统一北京时间（UTC+8）**：`fetch.py` 输出与 `build.py` 的 `norm_date()`
+  均按 UTC+8；抓取后请用 `python3 scripts/audit.py .` 体检（应输出「不一致 0」）。

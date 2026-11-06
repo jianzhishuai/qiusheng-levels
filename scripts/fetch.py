@@ -84,9 +84,17 @@ def next_cursor(html, base):
         return None
     return urllib.parse.urljoin(base, cands[0].replace("&amp;", "&"))
 
-def parse(html):
+ALLT = {}
+
+
+def parse(html, seen=None):
     """正文按 timeline-item 抽取；配图按 pbs 链接在全文中的位置，
-    归属到其前方最近的 /<账号>/status/<id>（Hoyooyoo 之外的账号视为边界）。"""
+    归属到其前方最近的 /<账号>/status/<id>（Hoyooyoo 之外的账号视为边界）。
+
+    seen: 已见过的推文 id 集合。传入时，本页已见过的推文仍会被解析并
+    补全图片（正文可能先于图片出现），但不会被计入"本页新增"。
+    返回 (本页推文字典, 本页新增 id 集合)。
+    """
     out = {}
     for b in re.split(r'<div class="timeline-item', html):
         tm = re.search(r'title="([^"]+ UTC)"', b)
@@ -124,7 +132,16 @@ def parse(html):
                                      "text": "", "images": [],
                                      "url": "https://x.com/Hoyooyoo/status/" + cur})
                 out[cur]["images"].append(val)
-    return out
+    # 跨页补图：推文正文可能在第1页、图片在后续页才出现，回填到已有条目
+    if seen and ALLT:
+        for tid, val in out.items():
+            prev = ALLT.get(tid)
+            if prev is not None and val.get("images"):
+                for im in val["images"]:
+                    if im not in prev["images"]:
+                        prev["images"].append(im)
+    fresh = set(out.keys()) - (seen if seen is not None else set())
+    return out, fresh
 
 def main():
     known = set()
@@ -132,6 +149,8 @@ def main():
     if os.path.exists(kf):
         known = set(x.strip() for x in open(kf) if x.strip())
     allt = {}
+    global ALLT
+    ALLT = allt
     dump_all = "--all" in sys.argv
     for group in [["https://nitter.cf/Hoyooyoo", "https://nitter.cf/Hoyooyoo/with_replies"],
                   ["https://nitter.poast.org/Hoyooyoo", "https://nitter.poast.org/Hoyooyoo/with_replies"]]:
@@ -151,11 +170,16 @@ def main():
                     try: h = get(nxt, 30)
                     except Exception as e:
                         print("[warn] 第%d页失败 %s" % (pg+1, e), file=sys.stderr); break
-                new = parse(h)
+                new, fresh = parse(h, set(allt.keys()))
                 before = len(allt)
                 allt.update(new)
-                print("[page %d] %s 累计 %d 条 (本页 %d)" % (pg+1, base, len(allt), len(allt)-before), file=sys.stderr)
-                if len(allt) - before == 0: break
+                print("[page %d] %s 累计 %d 条 (本页新增 %d)" % (pg+1, base, len(allt), len(fresh)), file=sys.stderr)
+                # 仅当本页【完全没有新推文】且已翻过至少2页才停止，
+                # 避免单页重复导致提前退出（实测 nitter 每页都有新内容）
+                if pg >= 1 and not fresh and len(allt) == before:
+                    print("[stop] 本页无新增且无新图，停止翻页", file=sys.stderr)
+                    break
+                if budget_left() <= 0: break
     if not allt:
         print("[fatal] 所有数据源均失败，本次跳过（不破坏已有内容）", file=sys.stderr)
         json.dump({"all_count": 0, "new_count": 0, "new": [], "error": "all_sources_failed"},
