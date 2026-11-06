@@ -49,9 +49,13 @@ def clean(x):
         x = x.replace(a, b)
     return re.sub(r'\n{3,}', '\n\n', x).strip()
 
+BJ = datetime.timezone(datetime.timedelta(hours=8))
+
+
 def snow_utc(ts):
+    """推文时间统一按北京时间（UTC+8）输出，与表格口径一致"""
     return datetime.datetime.fromtimestamp(((ts >> 22) + 1288834974657)/1000,
-                                          datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+                                          BJ).strftime("%Y-%m-%d %H:%M")
 
 def parse(html):
     """正文按 timeline-item 抽取；配图按 pbs 链接在全文中的位置，
@@ -71,7 +75,8 @@ def parse(html):
         tid = ids[0]
         raw_dt = tm.group(1) if tm else ""
         try:
-            dt = datetime.datetime.strptime(raw_dt, "%b %d, %Y · %I:%M %p UTC").strftime("%Y-%m-%d %H:%M")
+            _dt = datetime.datetime.strptime(raw_dt, "%b %d, %Y · %I:%M %p UTC").replace(tzinfo=datetime.timezone.utc)
+            dt = _dt.astimezone(BJ).strftime("%Y-%m-%d %H:%M")
         except Exception:
             dt = snow_utc(int(tid))
         if tid in out and out[tid]["text"]:
