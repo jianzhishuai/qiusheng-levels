@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""audit.py <workdir> —— 一��打印表结构/时区一致性/计数，避免每轮重复摸索。
+"""audit.py <workdir> —— 一屏打印表结构/时区一致性/计数，避免每轮重复摸索。
 用法: python3 scripts/audit.py .
 """
 import os, re, json, sys, datetime, collections
@@ -34,12 +34,17 @@ def main():
     DATA, T2 = slice_json(html, "DATA"), slice_json(html, "T2")
     T3, T2I = slice_json(html, "T3"), slice_json(html, "T2I")
     print("[source] %s  字节=%d" % (path, len(html.encode())))
+    if DATA is None or T2 is None:
+        print("[abort] 未能从基线解析出 DATA/T2，基线可能损坏，请检查 source_index.html")
+        return 2
+    DATA = DATA or []; T2 = T2 or []; T3 = T3 or []; T2I = T2I or []
     print("[counts] DATA=%d T2=%d T3=%d T2I=%d" % (len(DATA), len(T2), len(T3), len(T2I)))
     print("[cols]   DATA 行宽=%s  T2 行宽=%s" % (sorted(collections.Counter(len(r) for r in DATA)), sorted(collections.Counter(len(r) for r in T2))))
     print("[index]  DATA: 品种=1 点位=2 类型=3 状态=4 原文含义=5 推文日期=6 推文链接=7 推文原文=8 图上读数=9")
     print("[index]  T2 : 推文ID=1 日期=2 链接=3 原文=4 配图读数=5")
     bad = []; empty = []; stats = collections.Counter()
     for r in DATA:
+        if len(r) < 8: continue
         m = re.search(r'/status/(\d+)', str(r[7]))
         if not m:
             if not str(r[6]).strip(): empty.append((r[0], r[1], r[2], "无链接"))
@@ -48,6 +53,7 @@ def main():
         stats["一致" if c == w else "不一致"] += 1
         if c != w: bad.append((r[0], c, w))
     for r in T2:
+        if len(r) < 4: continue
         m = re.search(r'/status/(\d+)', str(r[3]))
         if not m: continue
         w = snow_bj(m.group(1)); c = str(r[2]).strip()
@@ -57,10 +63,10 @@ def main():
     for x in bad[:12]: print("         ! %s 显示=%s 应=%s" % x)
     if empty:
         print("[nodate] %d 行无日期且无链接，需人工补来源:" % len(empty))
-        for x in empty: print("         - #%s %s %s" % x)
+        for x in empty: print("         - #%s %s %s [%s]" % x)
     m = re.search(r'<div class="sub">(.*?)</div>', html, re.S)
     if m: print("[head]   %s" % m.group(1).strip())
     for probe in ["90000", "1222", "22685", "64.7", "4173.27", "已失效", "已兑现"]:
         if probe in html: print("[probe]  %-10s OK" % probe)
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
