@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""抓取 @Hoyooyoo 推文，输出尚未收录的推文（正文/时间/图片直链）。"""
+import urllib.request, urllib.error, re, json, os, sys, datetime, time
+
+UA = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+SOURCES = ["https://nitter.cf/Hoyooyoo", "https://nitter.cf/Hoyooyoo/with_replies",
+           "https://nitter.poast.org/Hoyooyoo", "https://nitter.poast.org/Hoyooyoo/with_replies"]
+# 同一主源的重试次数与退避（nitter 偶发 SSL EOF，重试即可恢复）
+RETRIES = 4
+BACKOFF = 4
+
+def get(url, timeout=45):
+    last = None
+    for attempt in range(RETRIES):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as f:
+                return f.read().decode("utf-8", "ignore")
+        except Exception as e:
+            last = e
+            time.sleep(BACKOFF * (attempt + 1))
+    raise last
+
+def get_any(sources, timeout=45):
+    """逐个尝试数据源，第一个成功的即返回；全部失败抛最后一个异常。"""
+    last = None
+    for u in sources:
+        try:
+            html = get(u, timeout)
+            if html and "/Hoyooyoo/status/" in html:
+                return html, u
+        except Exception as e:
+            last = e
+            print("[warn] %s -> %s" % (u, e), file=sys.stderr)
+    if last: raise last
+    raise RuntimeError("所有数据源均无有效内容")
+
+def clean(x):
+    x = re.sub(r'<br\s*/?>', '\n', x)
+    x = re.sub(r'<[^>]+>', '', x)
+    for a, b in [("&amp;","&"),("&lt;","<"),("&gt;",">"),("&#39;","'"),("&quot;",'"'),("&nbsp;"," ")]:
+        x = x.replace(a, b)
+    return re.sub(r'\n{3,}', '\n\n', x).strip()
+
+def snow_utc(ts):
+    return datetime.datetime.fromtimestamp(((ts >> 22) + 1288834974657)/1000,
+                                          datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+def parse(html):
+    out = {}
+    for b in re.split(r'<div class="timeline-item', html):
+        m = re.search(r'/Hoyooyoo/status/(\d+)', b)
+        if not m: continue
+        tid = m.group(1)
+        if tid in out: continue
+        tm = re.search(r'title="([^"]+ UTC)"', b)
+        txt = ""
+        cm = re.search(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>\s*<button class="translate-btn"', b, re.S)
+        if cm: txt = clean(cm.group(1))
+        imgs = sorted(set(re.findall(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', b)))
+        # 只保留本条推文自身的图（取到本条 status 链接之后的部分）
+        idx = b.find(m.group(0))
+        tail = b[idx:]
+        imgs = sorted(set(re.findall(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', tail)))
+        # 去掉正文之后可能串到的下一条：按 tweet-content 出现顺序取第一段 media
+        mm = re.search(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', b, re.S)
+        if mm:
+            seg = mm.group(1)
+            imgs = sorted(set(re.findall(r'pbs\.twimg\.com/media/([A-Za-z0-9_\-]+\.\w+)', b[:b.find(seg)+len(seg)])))
+        raw_dt = tm.group(1) if tm else ""
+        try:
+            dt = datetime.datetime.strptime(raw_dt, "%b %d, %Y · %I:%M %p UTC").strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            dt = snow_utc(int(tid))
+        out[tid] = {"id": tid, "date_utc": dt, "text": txt, "images": imgs,
+                    "url": "https://x.com/Hoyooyoo/status/" + tid}
+    return out
+
+def main():
+    known = set()
+    kf = sys.argv[1] if len(sys.argv) > 1 else "known_ids.txt"
+    if os.path.exists(kf):
+        known = set(x.strip() for x in open(kf) if x.strip())
+    allt = {}
+    ok_src = 0
+    for group in [["https://nitter.cf/Hoyooyoo", "https://nitter.cf/Hoyooyoo/with_replies"],
+                  ["https://nitter.poast.org/Hoyooyoo", "https://nitter.poast.org/Hoyooyoo/with_replies"]]:
+        try:
+            h, u = get_any(group)
+            allt.update(parse(h))
+            ok_src += 1
+            print("[ok] %s" % u, file=sys.stderr)
+        except Exception as e:
+            print("[warn] 源组失败 %s -> %s" % (group[0], e), file=sys.stderr)
+    if not allt:
+        print("[fatal] 所有数据源均失败，本次跳过（不破坏已有内容）", file=sys.stderr)
+        json.dump({"all_count": 0, "new_count": 0, "new": [], "error": "all_sources_failed"},
+                  open(sys.argv[2] if len(sys.argv) > 2 else "new_tweets.json", "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+        sys.exit(2)
+    new = {k: v for k, v in allt.items() if k not in known}
+    new = dict(sorted(new.items(), key=lambda kv: int(kv[0]), reverse=True))
+    outp = sys.argv[2] if len(sys.argv) > 2 else "new_tweets.json"
+    json.dump({"all_count": len(allt), "new_count": len(new), "new": list(new.values())},
+              open(outp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print("total=%d known=%d new=%d -> %s" % (len(allt), len(known), len(new), outp))
+    for v in new.values():
+        print("  %s %s %s | %s" % (v["id"], v["date_utc"], ",".join(v["images"]) or "-",
+                                   " ".join(v["text"].split())[:70]))
+
+if __name__ == "__main__":
+    main()
