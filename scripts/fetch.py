@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """抓取 @Hoyooyoo 推文，输出尚未收录的推文（正文/时间/图片直链）。"""
-import urllib.request, urllib.error, re, json, os, sys, datetime, time
+import urllib.request, urllib.error, urllib.parse, re, json, os, sys, datetime, time
+
+BUDGET = float(os.environ.get('FETCH_BUDGET', '180'))  # 全局时限（秒）
+MAX_PAGES = int(os.environ.get('FETCH_PAGES', '6'))      # 每个源的翻页深度
+START = time.time()
+def budget_left():
+    return BUDGET - (time.time() - START)
 
 UA = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
@@ -84,13 +90,29 @@ def main():
         known = set(x.strip() for x in open(kf) if x.strip())
     allt = {}
     ok_src = 0
+    dump_all = "--all" in sys.argv
     for group in [["https://nitter.cf/Hoyooyoo", "https://nitter.cf/Hoyooyoo/with_replies"],
                   ["https://nitter.poast.org/Hoyooyoo", "https://nitter.poast.org/Hoyooyoo/with_replies"]]:
         try:
             h, u = get_any(group)
-            allt.update(parse(h))
+            base = u
+            for pg in range(MAX_PAGES):
+                if pg:
+                    cur = allt
+                    m = re.search(r'href="([^"]*cursor=[^"]+)"', h)
+                    if not m: break
+                    nxt = urllib.parse.urljoin(base, m.group(1).replace("&amp;", "&"))
+                    if budget_left() <= 12: print("[stop] 预算耗尽，停在第%d页"%pg, file=sys.stderr); break
+                    try: h = get(nxt, 30)
+                    except Exception as e:
+                        print("[warn] 第%d页失败 %s"%(pg+1,e), file=sys.stderr); break
+                new = parse(h)
+                before = len(allt)
+                allt.update(new)
+                print("[page %d] %s 累计 %d 条 (本页 %d)" % (pg+1, base, len(allt), len(allt)-before), file=sys.stderr)
+                if len(allt) - before == 0: break
             ok_src += 1
-            print("[ok] %s" % u, file=sys.stderr)
+            print("[ok] %s" % base, file=sys.stderr)
         except Exception as e:
             print("[warn] 源组失败 %s -> %s" % (group[0], e), file=sys.stderr)
     if not allt:
@@ -99,7 +121,7 @@ def main():
                   open(sys.argv[2] if len(sys.argv) > 2 else "new_tweets.json", "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
         sys.exit(2)
-    new = {k: v for k, v in allt.items() if k not in known}
+    new = {k: v for k, v in allt.items() if k not in known} if not dump_all else dict(allt)
     new = dict(sorted(new.items(), key=lambda kv: int(kv[0]), reverse=True))
     outp = sys.argv[2] if len(sys.argv) > 2 else "new_tweets.json"
     json.dump({"all_count": len(allt), "new_count": len(new), "new": list(new.values())},
