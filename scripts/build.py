@@ -257,16 +257,23 @@ def main():
         print("[ABORT] 无法解析基线数据块: %s: %s" % (type(e).__name__, e))
         sys.exit(2)
     DATA, T2, T3, T2I = vals["DATA"], vals["T2"], vals["T3"], vals["T2I"]
-    start = len(DATA) + 1
     # rows 按推文链接去重，避免同一推文被重复收录
-    seen_links = {str(r[7]) for r in DATA if len(r) > 7}
-    for i, row in enumerate(nl.get("rows", [])):
+    # 去重键必须是 (链接,品种,点位) 三元组：同一条推文常给出多个点位
+    # （例：比特币那条同时给 79000/81000/80000），只用链接会把后续点位全部挤掉。
+    seen_keys = set()
+    for r in DATA:
+        if len(r) > 7:
+            seen_keys.add((str(r[7]), str(r[1]), str(r[2])))
+    n_new = 0
+    for row in nl.get("rows", []):
         # row = [品种,点位,类型,状态,原文含义,推文日期,推文链接,推文原文,图上读数]
         link = str(row[6]) if len(row) > 6 else ""
-        if link and link in seen_links:
-            print("[skip] 推文链接已收录，跳过: %s" % link); continue
-        DATA.append([str(start + i)] + list(row))
-        if link: seen_links.add(link)
+        key = (link, str(row[0]), str(row[1]))
+        if link and key in seen_keys:
+            print("[skip] 该点位已收录，跳过: %s %s %s" % (link, row[0], row[1])); continue
+        DATA.append([str(len(DATA) + 1)] + list(row))
+        seen_keys.add(key); n_new += 1
+    print("[rows] 新增 %d 行点位 -> DATA=%d" % (n_new, len(DATA)))
     for t in nl.get("images", []):
         T3.append(list(t))
     for t in nl.get("images", []):
