@@ -13,7 +13,7 @@
 3) 静态文字里的计数（条点位 / 条推文原文 / 张原图 / 共 N 张）全部由数据实时回写，
    不再留下与实际不符的旧数字。
 """
-import os, re, json, csv, base64, shutil, urllib.request, urllib.error, urllib.parse, sys, subprocess, tempfile
+import os, re, json, csv, base64, shutil, urllib.request, urllib.error, urllib.parse, sys, subprocess, tempfile, time
 
 DECL_ORDER = ("DATA", "T2", "T3", "T2I")
 
@@ -37,8 +37,10 @@ def slice_json(text, start):
     raise ValueError("JSON 未闭合")
 
 
-def api(token, path, method="GET", body=None):
-    url = "https://api.github.com" + path
+def api(token, path, method="GET", body=None, retries=4):
+    """path 可为 api.github.com 下的相对路径，也可为完整 URL。
+    偶发 SSL EOF / 连接重置时重试；仍失败则抛出，由调用方决定。"""
+    url = path if path.startswith("http") else "https://api.github.com" + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
         "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
@@ -49,6 +51,9 @@ def api(token, path, method="GET", body=None):
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "ignore")
     except Exception as e:
+        if retries > 1:
+            time.sleep(2 * (retries - 1))
+            return api(token, path, method, body, retries - 1)
         return None, "EXC %s %s" % (type(e).__name__, e)
 
 
@@ -253,14 +258,45 @@ def main():
         sys.exit(2)
     DATA, T2, T3, T2I = vals["DATA"], vals["T2"], vals["T3"], vals["T2I"]
     start = len(DATA) + 1
+    # rows 按推文链接去重，避免同一推文被重复收录
+    seen_links = {str(r[7]) for r in DATA if len(r) > 7}
     for i, row in enumerate(nl.get("rows", [])):
         # row = [品种,点位,类型,状态,原文含义,推文日期,推文链接,推文原文,图上读数]
+        link = str(row[6]) if len(row) > 6 else ""
+        if link and link in seen_links:
+            print("[skip] 推文链接已收录，跳过: %s" % link); continue
         DATA.append([str(start + i)] + list(row))
+        if link: seen_links.add(link)
     for t in nl.get("images", []):
         T3.append(list(t))
     for t in nl.get("images", []):
         if len(t) >= 5 and t[4] and t[1]:
             T2I[str(t[1])] = t[4]
+    # ---- 合并推文原文表 T2：按推文ID去重 ----
+    if nl.get("t2"):
+        have = {str(r[1]) for r in T2}
+        added = 0
+        for e in nl["t2"]:
+            if len(e) < 4: continue
+            tid = str(e[0]); date = e[1]; link = e[2]; text = e[3]
+            if tid in have: continue
+            T2.append([str(len(T2) + 1), tid, date, link, text, T2I.get(tid, "")])
+            have.add(tid); added += 1
+        if added: print("[t2] 新增 %d 条推文原文 -> T2=%d" % (added, len(T2)))
+    # ---- 状态更新：按 DATA 序号改写「状态」列(index 4) ----
+    if nl.get("updates"):
+        byseq = {str(r[0]): r for r in DATA}
+        hit = 0
+        for u in nl["updates"]:
+            seq = str(u[0]); newst = u[1]
+            row = byseq.get(seq)
+            if not row:
+                print("[warn] updates 序号 %s 不在 DATA 中，跳过" % seq); continue
+            if row[4] != newst:
+                print("[updates] #%s %s：%s -> %s" % (seq, row[1], row[4], newst))
+                row[4] = newst
+            hit += 1
+        print("[updates] 应用 %d 处状态更新" % hit)
     # 原子重建整块
     html = rebuild_block(html, {"DATA": DATA, "T2": T2, "T3": T3, "T2I": T2I})
     html = sync_counts(html, DATA, T2, T3)
@@ -280,11 +316,22 @@ def main():
         if not token:
             print("[skip] 未设 GH_TOKEN，跳过推送"); return
         files = ["index.html", "秋生trader_关键点位.csv", "秋生trader_关键点位.tsv", "秋生trader_关键点位与图文溯源.xlsx"]
+        extra = os.environ.get("GH_EXTRA_FILES", "")
+        if extra:
+            for f in extra.split(","):
+                f = f.strip()
+                if f and os.path.exists(os.path.join(wd, f)): files.append(f)
         for fn in files:
             st, raw = put(token, repo, fn, os.path.join(wd, fn), msg="Update %s" % fn)
             print("  push %-40s %s" % (fn, st))
             if st not in (200, 201):
                 print("[ABORT] 推送失败: %s" % raw[:300]); sys.exit(3)
+        sdir = os.path.join(wd, "scripts")
+        if os.path.isdir(sdir):
+            for fn in sorted(os.listdir(sdir)):
+                if not fn.endswith(".py"): continue
+                st2, _ = put(token, repo, "scripts/" + fn, os.path.join(sdir, fn), msg="Update scripts/%s" % fn)
+                print("  push scripts/%-18s %s" % (fn, st2))
         imdir = os.path.join(wd, "images")
         if os.path.isdir(imdir):
             for fn in sorted(os.listdir(imdir)):
