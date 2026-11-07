@@ -86,9 +86,14 @@ def next_cursor(html, base):
 
 ALLT = {}
 
-# nitter 的回复流页面会把站内搜索框等 UI 文本渲染进 tweet-content 容器，
-# 被正文正则误当成推文正文（实例：'搜索我的推文'）。这些不是作者的推文，直接丢弃。
-UI_NOISE = {"搜索我的推文", "Search my tweets"}
+# 判据说明（修正 2026-11-08）：
+#   旧实现用文本黑名单 UI_NOISE 丢弃正文等于"搜索我的推文"的区块，理由是"nitter 搜索框 UI"。
+#   但实测 nitter 页面中 search-form 元素数为 0，而 status 2118878555438448832 经
+#   fxtwitter 核实 author=Hoyooyoo、replying_to=yidiyuehan —— 它是作者本人的真实回复推文，
+#   文本黑名单会误杀真实推文（并永久丢失其正文）。
+#   现改为作者归属判据：正文必须落在本区块内某个 /Hoyooyoo/status/<id> 之后才收录，
+#   从根本上排除他人推文与 nitter 界面元素，不再依赖具体文案。
+UI_NOISE = set()          # 保留常量名以兼容外部引用，判定不再依赖文本
 
 
 def parse(html, seen=None):
@@ -107,11 +112,15 @@ def parse(html, seen=None):
             continue
         txt = clean(mm.group(1))
         if txt in UI_NOISE:
-            continue   # nitter UI 占位，非作者推文
-        ids = re.findall(r'/Hoyooyoo/status/(\d+)', b)
+            continue   # 兼容位：当前为空集，实际判定走作者归属
+        # 作者归属：正文必须出现在本区块内某个 /Hoyooyoo/status/<id> 之后。
+        # 取正文位置之前最近的 Hoyooyoo status 链接作为归属 id；
+        # 若正文之前没有任何 Hoyooyoo status 链接，则该区块不是作者推文，丢弃。
+        head = b[:mm.start()]
+        ids = re.findall(r'/Hoyooyoo/status/(\d+)', head)
         if not ids:
             continue
-        tid = ids[0]
+        tid = ids[-1]
         raw_dt = tm.group(1) if tm else ""
         try:
             _dt = datetime.datetime.strptime(raw_dt, "%b %d, %Y · %I:%M %p UTC").replace(tzinfo=datetime.timezone.utc)
