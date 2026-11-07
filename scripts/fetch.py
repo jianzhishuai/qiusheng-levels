@@ -86,6 +86,10 @@ def next_cursor(html, base):
 
 ALLT = {}
 
+# nitter 的回复流页面会把站内搜索框等 UI 文本渲染进 tweet-content 容器，
+# 被正文正则误当成推文正文（实例：'搜索我的推文'）。这些不是作者的推文，直接丢弃。
+UI_NOISE = {"搜索我的推文", "Search my tweets"}
+
 
 def parse(html, seen=None):
     """正文按 timeline-item 抽取；配图按 pbs 链接在全文中的位置，
@@ -102,6 +106,8 @@ def parse(html, seen=None):
         if not mm:
             continue
         txt = clean(mm.group(1))
+        if txt in UI_NOISE:
+            continue   # nitter UI 占位，非作者推文
         ids = re.findall(r'/Hoyooyoo/status/(\d+)', b)
         if not ids:
             continue
