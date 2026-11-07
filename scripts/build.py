@@ -251,6 +251,14 @@ def sync_counts(html, DATA, T2, T3):
         s = sub.group(1)
         s = re.sub(r"\d+ 条点位", "%d 条点位" % n_pts, s)
         s = re.sub(r"\d+ 条推文原文", "%d 条推文原文" % n_tw, s)
+        # 数据窗口：按 DATA 中实际推文日期的最早/最晚动态计算
+        ds = [str(r[6]) for r in DATA if len(r) > 6 and re.match(r"\d{4}-\d{2}-\d{2}", str(r[6]))]
+        if ds:
+            s = re.sub(r"数据窗口\s*\d{4}-\d{2}-\d{2}\s*~\s*\d{4}-\d{2}-\d{2}",
+                       "数据窗口 %s ~ %s" % (min(ds)[:10], max(ds)[:10]), s)
+        # 基线时刻：本次构建的北京时间
+        s = re.sub(r"基线时刻\s*\d{4}-\d{2}-\d{2}",
+                   "基线时刻 %s" % datetime.datetime.now(BJ).strftime("%Y-%m-%d"), s)
         s = re.sub(r"\d+ 张原图", "%d 张原图" % n_img, s)
         html = html.replace(sub.group(0), '<div class="sub">%s</div>' % s)
     html = re.sub(r'共\s*\d+\s*张', '共 %d 张' % n_img, html)
