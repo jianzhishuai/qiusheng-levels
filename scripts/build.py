@@ -298,17 +298,19 @@ def main():
             if _nd != _r[2]: _r[2] = _nd; _tz += 1
     print("[tz] 基线日期按北京时间(UTC+8)重算，修正 %d 处" % _tz)
     # rows 按推文链接去重，避免同一推文被重复收录
-    # 去重键必须是 (链接,品种,点位) 三元组：同一条推文常给出多个点位
+    # 去重键必须是 (链接,品种,点位,类型) 四元组：同一条推文常给出多个点位，
+    # 也常对同一标的同一价位给出多个不同判断（例：同一推文里"反弹衰竭做空"与
+    # "V型反转概率极低"两点位同为未给具体点位、仅类型不同），漏掉类型会误伤后者。
     # （例：比特币那条同时给 79000/81000/80000），只用链接会把后续点位全部挤掉。
     seen_keys = set()
     for r in DATA:
         if len(r) > 7:
-            seen_keys.add((str(r[7]), str(r[1]), str(r[2])))
+            seen_keys.add((str(r[7]), str(r[1]), str(r[2]), str(r[3])))
     n_new = 0
     for row in nl.get("rows", []):
         # row = [品种,点位,类型,状态,原文含义,推文日期,推文链接,推文原文,图上读数]
         link = str(row[6]) if len(row) > 6 else ""
-        key = (link, str(row[0]), str(row[1]))
+        key = (link, str(row[0]), str(row[1]), str(row[2]))
         if link and key in seen_keys:
             print("[skip] 该点位已收录，跳过: %s %s %s" % (link, row[0], row[1])); continue
         if len(row) > 6:
