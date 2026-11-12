@@ -16,18 +16,25 @@ START = time.time()
 def budget_left():
     return BUDGET - (time.time() - START)
 
-UA = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+# 2026-11-12 实测：不同 nitter 镜像对 User-Agent 的行为相反。
+#   nitter.cf            -> 浏览器 UA 返回完整时间线；curl UA 也可用（曾 429）
+#   nitter.tiekoetter.com-> 浏览器 UA 返回空壳(8KB/0 id)；curl/8.4.0 才返回完整内容(59KB/34 id)
+# 因此 UA 必须【按源】指定，不能全局共用，否则备用源会被误判为"无有效内容"。
+BROWSER_UA = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+CURL_UA    = {"User-Agent":"curl/8.4.0"}
+UA = BROWSER_UA
 SOURCES = ["https://nitter.cf/Hoyooyoo", "https://nitter.cf/Hoyooyoo/with_replies",
            "https://nitter.poast.org/Hoyooyoo", "https://nitter.poast.org/Hoyooyoo/with_replies"]
 RETRIES = 4
 BACKOFF = 4
 
-def get(url, timeout=45):
+def get(url, timeout=45, ua=None):
     last = None
+    headers = ua or BROWSER_UA
     for attempt in range(RETRIES):
         try:
-            req = urllib.request.Request(url, headers=UA)
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as f:
                 return f.read().decode("utf-8", "ignore")
         except Exception as e:
@@ -38,13 +45,13 @@ def get(url, timeout=45):
 def get_all(sources, timeout=45):
     """抓取组内【所有】数据源，返回 [(url, html), ...]；全部失败才抛错。"""
     pages, last = [], None
-    for u in sources:
+    for u, ua in sources:
         if budget_left() <= 10:
             print("[stop] 预算不足，跳过 %s" % u, file=sys.stderr); break
         try:
-            html = get(u, timeout)
+            html = get(u, timeout, ua)
             if html and "/Hoyooyoo/status/" in html:
-                pages.append((u, html))
+                pages.append((u, html, ua))
                 print("[ok] %s (%d 字节)" % (u, len(html)), file=sys.stderr)
             else:
                 print("[warn] %s 无有效内容" % u, file=sys.stderr)
@@ -167,14 +174,18 @@ def main():
     global ALLT
     ALLT = allt
     dump_all = "--all" in sys.argv
-    for group in [["https://nitter.cf/Hoyooyoo", "https://nitter.cf/Hoyooyoo/with_replies"],
-                  ["https://nitter.poast.org/Hoyooyoo", "https://nitter.poast.org/Hoyooyoo/with_replies"]]:
+    for group in [[("https://nitter.cf/Hoyooyoo", BROWSER_UA),
+                   ("https://nitter.cf/Hoyooyoo/with_replies", BROWSER_UA)],
+                  [("https://nitter.tiekoetter.com/Hoyooyoo", CURL_UA),
+                   ("https://nitter.tiekoetter.com/Hoyooyoo/with_replies", CURL_UA)],
+                  [("https://nitter.poast.org/Hoyooyoo", BROWSER_UA),
+                   ("https://nitter.poast.org/Hoyooyoo/with_replies", BROWSER_UA)]]:
         try:
             pages = get_all(group)
         except Exception as e:
-            print("[warn] 源组失败 %s -> %s" % (group[0], e), file=sys.stderr)
+            print("[warn] 源组失败 %s -> %s" % (group[0][0], e), file=sys.stderr)
             continue
-        for base, h0 in pages:
+        for base, h0, gua in pages:
             h = h0
             for pg in range(MAX_PAGES):
                 if pg:
@@ -182,7 +193,7 @@ def main():
                     if not nxt: break
                     if budget_left() <= 12:
                         print("[stop] 预算耗尽，停在第%d页" % pg, file=sys.stderr); break
-                    try: h = get(nxt, 30)
+                    try: h = get(nxt, 30, gua)
                     except Exception as e:
                         print("[warn] 第%d页失败 %s" % (pg+1, e), file=sys.stderr); break
                 new, fresh = parse(h, set(allt.keys()))
