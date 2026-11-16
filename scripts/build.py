@@ -38,6 +38,58 @@ def norm_date(link, cur):
         return cur
 
 
+DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$')
+TID_RE = re.compile(r'^\d{15,25}$')
+LINK_TMPL = "https://x.com/Hoyooyoo/status/%s"
+
+
+def fix_date_link(r):
+    """修正「推文日期 / 推文链接」两列错位。
+
+    历史事故：某些批次写 new_levels.json 时漏掉了「推文链接」槽位，
+    把推文ID写进了日期位、把日期写进了链接位，追加后整行左移一位。
+    这里按「日期位形如 2026-11-15 18:01、链接位为 http(s) URL」复原，
+    并用推文ID的 snowflake 重算北京时间，保证与源站一致。返回 True=已修正。
+    """
+    if len(r) < 8:
+        return False
+    d, l = str(r[6]), str(r[7])
+    # 情形A：日期位是裸推文ID、链接位是日期
+    if TID_RE.match(d) and DATE_RE.match(l):
+        try:
+            r[6] = snow_bj(d)
+        except Exception:
+            r[6] = l
+        r[7] = LINK_TMPL % d
+        return True
+    # 情形B：链接位是裸推文ID
+    if TID_RE.match(l):
+        r[7] = LINK_TMPL % l
+        r[6] = norm_date(r[7], r[6])
+        return True
+    # 情形C：日期位不像日期、链接位是日期
+    if (not DATE_RE.match(d)) and DATE_RE.match(l):
+        r[6], r[7] = l, d
+        return True
+    return False
+
+
+def fix_new_row(row):
+    """new_levels.json 行格式应为
+    [品种,点位,类型,状态,原文含义,推文日期,推文链接,推文原文,图上读数]；
+    若误写成 [.., 含义, 推文ID, 日期, 原文, 读数]（漏链接槽位），在此复原。"""
+    row = list(row)
+    if len(row) >= 9 and TID_RE.match(str(row[5])) and DATE_RE.match(str(row[6])):
+        tid = str(row[5])
+        try:
+            dt = snow_bj(tid)
+        except Exception:
+            dt = str(row[6])
+        return [row[0], row[1], row[2], row[3], row[4], dt, LINK_TMPL % tid, row[7], row[8]]
+    return row
+
+
+
 
 def slice_json(text, start):
     """从 text[start] 起截取配平的 JSON 值（[] 或 {}），正确跳过字符串内的括号"""
@@ -286,6 +338,14 @@ def main():
         print("[ABORT] 无法解析基线数据块: %s: %s" % (type(e).__name__, e))
         sys.exit(2)
     DATA, T2, T3, T2I = vals["DATA"], vals["T2"], vals["T3"], vals["T2I"]
+    # ---- 自愈：修正历史上「推文日期 / 推文链接」错位的行 ----
+    _fx = 0
+    for _r in DATA:
+        if fix_date_link(_r):
+            _fx += 1
+            print("[fix] #%s %s %s -> 日期 %s | 链接 %s" % (_r[0], _r[1], _r[2], _r[6], _r[7]))
+    if _fx:
+        print("[fix] 修正 %d 行「推文日期/推文链接」错位" % _fx)
     # ---- 时区统一：基线里所有推文日期按北京时间(UTC+8)重算 ----
     _tz = 0
     for _r in DATA:
@@ -307,7 +367,8 @@ def main():
         if len(r) > 7:
             seen_keys.add((str(r[7]), str(r[1]), str(r[2]), str(r[3])))
     n_new = 0
-    for row in nl.get("rows", []):
+    for _row in nl.get("rows", []):
+        row = fix_new_row(_row)
         # row = [品种,点位,类型,状态,原文含义,推文日期,推文链接,推文原文,图上读数]
         link = str(row[6]) if len(row) > 6 else ""
         key = (link, str(row[0]), str(row[1]), str(row[2]))
@@ -349,6 +410,15 @@ def main():
                 row[4] = newst
             hit += 1
         print("[updates] 应用 %d 处状态更新" % hit)
+    # ---- 出库前自检：日期位 / 链接位是否仍然对位 ----
+    _bad = [str(r[0]) for r in DATA if len(r) > 7 and str(r[7]) not in ("", "—", "-")
+            and not str(r[7]).startswith("http")]
+    _badd = [str(r[0]) for r in DATA if len(r) > 6 and str(r[6]) not in ("", "—", "-")
+             and not DATE_RE.match(str(r[6]))]
+    if _bad or _badd:
+        print("[warn] 对位异常: 链接位 %s / 日期位 %s" % (_bad[:20], _badd[:20]))
+    else:
+        print("[check] 全部 %d 行「推文日期 / 推文链接」对位正常" % len(DATA))
     # 原子重建整块
     html = rebuild_block(html, {"DATA": DATA, "T2": T2, "T3": T3, "T2I": T2I})
     html = sync_counts(html, DATA, T2, T3)
@@ -385,7 +455,7 @@ def main():
                 st2, _ = put(token, repo, "scripts/" + fn, os.path.join(sdir, fn), msg="Update scripts/%s" % fn)
                 print("  push scripts/%-18s %s" % (fn, st2))
         imdir = os.path.join(wd, "images")
-        if os.path.isdir(imdir):
+        if os.path.isdir(imdir) and not os.environ.get("GH_SKIP_IMAGES"):
             for fn in sorted(os.listdir(imdir)):
                 st, raw = put(token, repo, "images/" + fn, os.path.join(imdir, fn), msg="Add image %s" % fn)
                 if st not in (200, 201): print("  push images/%s -> %s" % (fn, st))
